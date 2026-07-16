@@ -58,7 +58,7 @@ jobs:
 
     - name: Build
       run: |
-        xcaddy build master --output ${{ runner.temp }}/${{ matrix.name }} --with github.com/mholt/caddy-ratelimit=./
+        xcaddy build master --output ${{ runner.temp }}/${{ matrix.name }} --with github.com/msasso/caddy-ratelimit=./
         # smoking test
         echo ''
         echo '########'
