@@ -51,6 +51,8 @@ A zone also has a key, which is different from its name. Keys associate 1:1 with
 
 A zone is synonymous with a rate limit, being a number of events per duration. Both `window` and `max_events` are required configuration for a zone. For example: 100 events every 1 minute. Because this module uses a sliding window algorithm, it works by looking back `<window>` duration and seeing if `<max_events>` events have already happened in that timeframe. If so, an internal HTTP 429 error is generated and returned, invoking error routes which you have defined (if any). Otherwise, a reservation is made and the event is allowed through.
 
+Optionally, a zone can set `burst`, which switches it from a sliding window to a leaky bucket: the bucket holds up to `<burst>` events, which may be spent back-to-back, and capacity leaks back at the sustained rate of `<max_events>` per `<window>` (one event every `<window>/<max_events>`). An idle key accumulates capacity up to `<burst>`. This absorbs short spikes while smoothly enforcing the average rate, instead of admitting `<max_events>` at once and then blocking for the rest of the window.
+
 Each zone may optionally filter the requests it applies to by specifying [request matchers](https://caddyserver.com/docs/modules/http#servers/routes/match).
 
 Unlike nginx's rate limit module, this one does not require you to set a memory bound. Instead, rate limiters are scanned every so often and expired ones are deleted so their memory can be recovered by the garbage collector: Caddy does not drop rate limiters on the floor and forget events like nginx does.
@@ -79,6 +81,7 @@ This is an HTTP handler module, so it can be used wherever `http.handlers` modul
 			"key": "",
 			"window": "",
 			"max_events": 0,
+			"burst": 0,
 			"ipv4_prefix": 0,
 			"ipv6_prefix": 0
 		}
@@ -98,6 +101,8 @@ This is an HTTP handler module, so it can be used wherever `http.handlers` modul
 
 
 All fields are optional, but to be useful, you'll need to define at least one zone, and a zone requires `window` and `max_events` to be set. Keys can be static (no placeholders) or dynamic (with placeholders). Matchers can be used to filter requests that apply to a zone. Replace `<name>` with your RL zone's name.
+
+The `burst` field enables leaky-bucket behavior for the zone: up to `burst` events may be admitted back-to-back, and capacity regenerates at the sustained rate of `max_events` per `window`. When omitted, the zone uses the plain sliding window algorithm described above.
 
 The `ipv4_prefix` and `ipv6_prefix` fields allow grouping rate limit keys by network subnet when the key resolves to an IP address. For example, setting `ipv6_prefix` to `64` will mask all IPv6 addresses to their `/64` network prefix, so all addresses within the same `/64` share a single rate limit bucket. This is useful for preventing abuse from clients cycling through many addresses within an IPv6 prefix. Each address family is configured independently; when a prefix is not set (or `0`), addresses of that family are treated individually as usual.
 
@@ -153,6 +158,7 @@ rate_limit {
 		key         <string>
 		window      <duration>
 		events      <max_events>
+		burst       <size>
 		ipv4_prefix <bits>
 		ipv6_prefix <bits>
 	}

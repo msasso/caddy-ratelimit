@@ -101,7 +101,7 @@ func TestDistributed(t *testing.T) {
 			if err != nil {
 				t.Fatal("failed to parse duration")
 			}
-			simulatedPeer := newRingBufferRateLimiter(maxEvents, parsedDuration)
+			simulatedPeer := newRingBufferRateLimiter(maxEvents, parsedDuration, 0)
 
 			for i := 0; i < testCase.peerRequests; i++ {
 				if when := simulatedPeer.When(); when != 0 {

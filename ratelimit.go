@@ -36,8 +36,20 @@ type RateLimit struct {
 	// limiter for each different client IP address.
 	Key string `json:"key,omitempty"`
 
-	// Number of events allowed within the window.
+	// Number of events allowed within the window. When Burst is set,
+	// this is the sustained rate: capacity regenerates at max_events
+	// per window (one event every window/max_events).
 	MaxEvents int `json:"max_events,omitempty"`
+
+	// Burst, if set, switches the zone from a sliding window to a leaky
+	// bucket (token bucket): Burst is the bucket capacity, i.e. the
+	// maximum number of events that may be admitted back-to-back, and
+	// capacity leaks back at the sustained rate of MaxEvents per Window
+	// (one event every Window/MaxEvents). An idle key accumulates
+	// capacity up to Burst. When unset (0, the default), the zone is a
+	// plain sliding window: at most MaxEvents in any Window, with no
+	// pacing between them.
+	Burst int `json:"burst,omitempty"`
 
 	// Duration of the sliding window.
 	Window caddy.Duration `json:"window,omitempty"`
@@ -61,6 +73,21 @@ type RateLimit struct {
 
 	zoneName string
 
+	// capacity is the size of each limiter's ring buffer: Burst in
+	// leaky-bucket mode, MaxEvents in sliding-window mode.
+	capacity int
+
+	// effectiveWindow is the window enforced by the underlying limiter. In
+	// sliding-window mode it is Window. In leaky-bucket mode the ring holds
+	// Burst timestamps, so it is Burst*emission (~ Window*Burst/MaxEvents),
+	// which keeps counting (distributed rate limiting) and sweeping
+	// consistent with the sustained rate of MaxEvents per Window.
+	effectiveWindow time.Duration
+
+	// emission is the leaky-bucket leak interval, Window/MaxEvents: the
+	// sustained pace of one event per emission. Zero in sliding-window mode.
+	emission time.Duration
+
 	limitersMap *rateLimitersMap
 }
 
@@ -71,6 +98,27 @@ func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
 	if rl.MaxEvents < 0 {
 		return fmt.Errorf("max_events must be at least zero")
 	}
+	if rl.Burst < 0 {
+		return fmt.Errorf("burst must be at least zero")
+	}
+	if rl.Burst > 0 && rl.MaxEvents == 0 {
+		return fmt.Errorf("burst requires max_events to be greater than zero")
+	}
+
+	rl.capacity = rl.MaxEvents
+	rl.effectiveWindow = time.Duration(rl.Window)
+	rl.emission = 0
+	if rl.Burst > 0 {
+		// leaky bucket: capacity of Burst events, leaking one event every
+		// Window/MaxEvents. The ring buffer records the last Burst events,
+		// and the window it covers is sized to the time a full bucket takes
+		// to drain, so counting and sweeping stay consistent with the
+		// sustained rate of MaxEvents per Window.
+		rl.capacity = rl.Burst
+		rl.emission = time.Duration(rl.Window) / time.Duration(rl.MaxEvents)
+		rl.effectiveWindow = rl.emission * time.Duration(rl.Burst)
+	}
+
 	if rl.IPv4Prefix < 0 || rl.IPv4Prefix > 32 {
 		return fmt.Errorf("ipv4_prefix must be between 0 and 32")
 	}
@@ -94,7 +142,7 @@ func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
 	if val, loaded := rateLimits.LoadOrStore(name, rl.limitersMap); loaded {
 		rl.limitersMap = val.(*rateLimitersMap)
 	}
-	rl.limitersMap.updateAll(rl.MaxEvents, time.Duration(rl.Window))
+	rl.limitersMap.updateAll(rl.capacity, rl.effectiveWindow, rl.emission)
 
 	return nil
 }
@@ -116,13 +164,13 @@ func newRateLimiterMap() *rateLimitersMap {
 
 // getOrInsert returns an existing rate limiter from the map, or inserts a new
 // one with the desired settings and returns it.
-func (rlm *rateLimitersMap) getOrInsert(key string, maxEvents int, window time.Duration) *ringBufferRateLimiter {
+func (rlm *rateLimitersMap) getOrInsert(key string, maxEvents int, window, emission time.Duration) *ringBufferRateLimiter {
 	rlm.limitersMu.Lock()
 	defer rlm.limitersMu.Unlock()
 
 	rateLimiter, ok := rlm.limiters[key]
 	if !ok {
-		newRateLimiter := newRingBufferRateLimiter(maxEvents, window)
+		newRateLimiter := newRingBufferRateLimiter(maxEvents, window, emission)
 		rlm.limiters[key] = newRateLimiter
 		return newRateLimiter
 	}
@@ -130,13 +178,14 @@ func (rlm *rateLimitersMap) getOrInsert(key string, maxEvents int, window time.D
 }
 
 // updateAll updates existing rate limiters with new settings.
-func (rlm *rateLimitersMap) updateAll(maxEvents int, window time.Duration) {
+func (rlm *rateLimitersMap) updateAll(maxEvents int, window, emission time.Duration) {
 	rlm.limitersMu.Lock()
 	defer rlm.limitersMu.Unlock()
 
 	for _, limiter := range rlm.limiters {
 		limiter.SetMaxEvents(maxEvents)
 		limiter.SetWindow(time.Duration(window))
+		limiter.SetEmission(emission)
 	}
 }
 

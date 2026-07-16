@@ -23,18 +23,30 @@ import (
 // consisting of a maximum number of events within a single
 // sliding window of a given duration. An empty value is
 // not valid; always call initialize() before using.
+//
+// If emission is nonzero, admission instead follows leaky-bucket
+// semantics via the Generic Cell Rate Algorithm (GCRA): the bucket
+// holds len(ring) events and drains one event every emission. The
+// ring still records the timestamps of admitted events so that
+// counting (for distributed rate limiting) and sweeping continue
+// to work.
 type ringBufferRateLimiter struct {
-	mu     sync.Mutex
-	window time.Duration
-	ring   []time.Time // len(ring) == maxEvents
-	cursor int         // always points to the oldest timestamp
+	mu       sync.Mutex
+	window   time.Duration
+	emission time.Duration // leak interval; 0 means plain sliding window
+	tat      time.Time     // GCRA theoretical arrival time (leaky-bucket state)
+	ring     []time.Time   // len(ring) == maxEvents
+	cursor   int           // always points to the oldest timestamp
 }
 
 // newRingBufferRateLimiter sets up a new rate limiter, allowing maxEvents
 // in a sliding window of size window. If maxEvents is 0, no events are
-// allowed. If window is 0, all events are allowed. It panics if maxEvents or
-// window are less than zero.
-func newRingBufferRateLimiter(maxEvents int, window time.Duration) *ringBufferRateLimiter {
+// allowed. If window is 0, all events are allowed. If emission is nonzero,
+// leaky-bucket pacing is enforced instead of the sliding window: bursts of
+// up to maxEvents are admitted, draining one event every emission; window
+// must then equal maxEvents*emission. It panics if maxEvents, window, or
+// emission are less than zero.
+func newRingBufferRateLimiter(maxEvents int, window, emission time.Duration) *ringBufferRateLimiter {
 	r := new(ringBufferRateLimiter)
 	if maxEvents < 0 {
 		panic("maxEvents cannot be less than zero")
@@ -42,7 +54,11 @@ func newRingBufferRateLimiter(maxEvents int, window time.Duration) *ringBufferRa
 	if window < 0 {
 		panic("window cannot be less than zero")
 	}
+	if emission < 0 {
+		panic("emission cannot be less than zero")
+	}
 	r.window = window
+	r.emission = emission
 	r.ring = make([]time.Time, maxEvents) // TODO: we can probably pool these
 	return r
 }
@@ -56,7 +72,17 @@ func (r *ringBufferRateLimiter) When() time.Duration {
 	if r.allowed() {
 		return 0
 	}
-	return r.ring[r.cursor].Add(r.window).Sub(now())
+	return r.whenUnsynced(now())
+}
+
+// whenUnsynced returns the duration from t until the next event would be
+// allowed. It is NOT safe for concurrent use, so it must be called inside
+// a lock on r.mu.
+func (r *ringBufferRateLimiter) whenUnsynced(t time.Time) time.Duration {
+	if r.emission > 0 {
+		return r.tat.Sub(t) - (r.window - r.emission)
+	}
+	return r.ring[r.cursor].Add(r.window).Sub(t)
 }
 
 // allowed returns true if the event is allowed to happen right now.
@@ -67,19 +93,50 @@ func (r *ringBufferRateLimiter) allowed() bool {
 	if len(r.ring) == 0 {
 		return false
 	}
-	if now().Sub(r.ring[r.cursor]) > r.window {
+	t := now()
+	if r.emission > 0 {
+		if r.conformsUnsynced(t) {
+			r.reserve()
+			return true
+		}
+		return false
+	}
+	if t.Sub(r.ring[r.cursor]) > r.window {
 		r.reserve()
 		return true
 	}
 	return false
 }
 
+// conformsUnsynced reports whether an event at time t conforms to the
+// leaky-bucket pacing (GCRA): the event is allowed if the theoretical
+// arrival time is no more than window-emission (i.e. bucket capacity
+// minus the one slot this event takes) ahead of t. It always returns
+// true in sliding-window mode (emission == 0), where admission is
+// governed by the ring instead. It is NOT safe for concurrent use, so
+// it must be called inside a lock on r.mu.
+func (r *ringBufferRateLimiter) conformsUnsynced(t time.Time) bool {
+	if r.emission == 0 {
+		return true
+	}
+	return !r.tat.After(t.Add(r.window - r.emission))
+}
+
 // reserve claims the current spot in the ring buffer
-// and advances the cursor.
+// and advances the cursor. In leaky-bucket mode it also
+// drains one unit of bucket capacity by advancing the
+// theoretical arrival time.
 // It is NOT safe for concurrent use, so it must
 // be called inside a lock on r.mu.
 func (r *ringBufferRateLimiter) reserve() {
-	r.ring[r.cursor] = now()
+	t := now()
+	if r.emission > 0 {
+		if r.tat.Before(t) {
+			r.tat = t
+		}
+		r.tat = r.tat.Add(r.emission)
+	}
+	r.ring[r.cursor] = t
 	r.advance()
 }
 
@@ -165,6 +222,18 @@ func (r *ringBufferRateLimiter) SetWindow(window time.Duration) {
 	}
 	r.mu.Lock()
 	r.window = window
+	r.mu.Unlock()
+}
+
+// SetEmission changes r's leaky-bucket leak interval to emission;
+// zero disables leaky-bucket pacing (plain sliding window).
+// It panics if emission is less than zero.
+func (r *ringBufferRateLimiter) SetEmission(emission time.Duration) {
+	if emission < 0 {
+		panic("emission cannot be less than zero")
+	}
+	r.mu.Lock()
+	r.emission = emission
 	r.mu.Unlock()
 }
 

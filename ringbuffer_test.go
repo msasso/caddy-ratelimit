@@ -24,7 +24,7 @@ func TestCount(t *testing.T) {
 
 	var zeroTime time.Time
 	bufSize := 10
-	rb := newRingBufferRateLimiter(bufSize, time.Duration(bufSize)*time.Second)
+	rb := newRingBufferRateLimiter(bufSize, time.Duration(bufSize)*time.Second, 0)
 	startTime := now()
 
 	count, oldest := rb.Count(now())
@@ -84,5 +84,55 @@ func TestCount(t *testing.T) {
 	}
 	if oldest != zeroTime {
 		t.Fatalf("oldest time %+v is wrong", oldest)
+	}
+}
+
+func TestLeakyBucket(t *testing.T) {
+	initTime()
+
+	// bucket capacity of 3 events, leaking one event every 10s
+	// (i.e. max_events 3 per window 30s with burst 3)
+	emission := 10 * time.Second
+	rb := newRingBufferRateLimiter(3, 3*emission, emission)
+
+	// a full bucket absorbs a burst of 3, then rejects
+	for i := 0; i < 3; i++ {
+		if when := rb.When(); when != 0 {
+			t.Fatalf("burst event %d should be allowed, got wait of %v", i, when)
+		}
+	}
+	if when := rb.When(); when != emission {
+		t.Fatalf("empty bucket should require a wait of one emission interval, got %v", when)
+	}
+
+	// after one emission interval, exactly one event has leaked out
+	advanceTime(10)
+	if when := rb.When(); when != 0 {
+		t.Fatalf("one event should be allowed after leak interval, got wait of %v", when)
+	}
+	if when := rb.When(); when != emission {
+		t.Fatalf("second event should wait one emission interval, got %v", when)
+	}
+
+	// 25s later, two more events have leaked out (2.5 rounds down)
+	advanceTime(35)
+	for i := 0; i < 2; i++ {
+		if when := rb.When(); when != 0 {
+			t.Fatalf("drained event %d should be allowed, got wait of %v", i, when)
+		}
+	}
+	if when := rb.When(); when != emission/2 {
+		t.Fatalf("expected wait of %v for next event, got %v", emission/2, when)
+	}
+
+	// a long idle period refills the bucket, but only up to its capacity
+	advanceTime(1000)
+	for i := 0; i < 3; i++ {
+		if when := rb.When(); when != 0 {
+			t.Fatalf("event %d after idle should be allowed, got wait of %v", i, when)
+		}
+	}
+	if when := rb.When(); when != emission {
+		t.Fatalf("bucket should not refill beyond capacity; expected wait %v, got %v", emission, when)
 	}
 }

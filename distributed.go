@@ -213,22 +213,28 @@ func (h Handler) distributedRateLimiting(w http.ResponseWriter, r *http.Request,
 
 	// add our own internal count (we do this at the end instead of the beginning
 	// so the critical section over this limiter's lock is smaller), and make the
-	// reservation if we're within the limit
+	// reservation if we're within the cluster-wide limit and, in leaky-bucket
+	// mode, the local pacing
 	limiter.mu.Lock()
 	count, oldestLocalEvent := limiter.countUnsynced(now())
 	totalCount += count
 	if oldestLocalEvent.Before(oldestEvent) && oldestLocalEvent.After(now().Add(-window)) {
 		oldestEvent = oldestLocalEvent
 	}
-	if totalCount < maxAllowed {
+	if totalCount < maxAllowed && limiter.conformsUnsynced(now()) {
 		limiter.reserve()
 		limiter.mu.Unlock()
 		return nil
 	}
+	// limit exceeded; report the wait of whichever constraint blocked the
+	// event: the cluster-wide count, or the local leaky-bucket pacing
+	wait := oldestEvent.Add(window).Sub(now())
+	if totalCount < maxAllowed {
+		wait = limiter.whenUnsynced(now())
+	}
 	limiter.mu.Unlock()
 
-	// otherwise, it appears limit has been exceeded
-	return h.rateLimitExceeded(w, r, repl, zoneName, rlKey, oldestEvent.Add(window).Sub(now()))
+	return h.rateLimitExceeded(w, r, repl, zoneName, rlKey, wait)
 }
 
 type rlStateValue struct {

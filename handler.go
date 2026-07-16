@@ -169,7 +169,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.rateLimits = append(h.rateLimits, rl)
 
 		// Record configuration metrics
-		h.metrics.recordConfig(name, rl.MaxEvents, time.Duration(rl.Window), rl.IPv4Prefix, rl.IPv6Prefix)
+		h.metrics.recordConfig(name, rl.MaxEvents, rl.Burst, time.Duration(rl.Window), rl.IPv4Prefix, rl.IPv6Prefix)
 	}
 
 	// sort by tightest rate limit to most permissive (issue #10)
@@ -213,7 +213,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		key := repl.ReplaceAll(rl.Key, "")
 		key = applyNetworkPrefix(key, rl.IPv4Prefix, rl.IPv6Prefix)
 		lastKey = key
-		limiter := rl.limitersMap.getOrInsert(key, rl.MaxEvents, time.Duration(rl.Window))
+		limiter := rl.limitersMap.getOrInsert(key, rl.capacity, rl.effectiveWindow, rl.emission)
 
 		if h.Distributed == nil {
 			// internal rate limiter only

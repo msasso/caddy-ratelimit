@@ -43,6 +43,7 @@ func parseCaddyfile(helper httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, e
 //	        key         <string>
 //	        window      <duration>
 //	        events      <max_events>
+//	        burst       <size>
 //	        ipv4_prefix <bits>
 //	        ipv6_prefix <bits>
 //	        match {
@@ -111,6 +112,19 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 							return d.Errf("invalid max events integer '%s': %v", d.Val(), err)
 						}
 						zone.MaxEvents = maxEvents
+
+					case "burst":
+						if !d.NextArg() {
+							return d.ArgErr()
+						}
+						if zone.Burst != 0 {
+							return d.Errf("zone burst already specified: %v", zone.Burst)
+						}
+						burst, err := strconv.Atoi(d.Val())
+						if err != nil {
+							return d.Errf("invalid burst integer '%s': %v", d.Val(), err)
+						}
+						zone.Burst = burst
 
 					case "ipv4_prefix":
 						if !d.NextArg() {
