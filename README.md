@@ -39,7 +39,7 @@ This module implements both internal and distributed HTTP rate limiting. Request
 To build Caddy with this module, use [xcaddy](https://github.com/caddyserver/xcaddy):
 
 ```bash
-$ xcaddy build --with github.com/mholt/caddy-ratelimit
+$ xcaddy build --with github.com/msasso/caddy-ratelimit
 ```
 
 
